@@ -14,10 +14,6 @@ if (!class_exists('Archive_TAR')) {
 CLI::seto(
     array(
         'd:' => 'Temporary Data directory',
-        'f:' => 'FTP(s) Server address (i.e. ftp.example.org)',
-        'u:' => 'FTP Username',
-        'p::' => 'FTP Password',
-        'P:' => 'FTP Port (default: 21)',
         'w:' => 'Wordpress Path on remote host',
         'v:' => 'Wordpress Version',
 		'l' => 'Check Plugins',
@@ -25,7 +21,7 @@ CLI::seto(
     )
 );
 
-if (!CLI::geto('f') || !CLI::geto('v') || !CLI::geto('u') || !CLI::geto('p') || !CLI::geto('w')) {
+if ( !CLI::geto('v') || !CLI::geto('w')) {
     CLI::gethelp();
     exit(-1);
 }
@@ -45,14 +41,15 @@ if (!$data_dir = CLI::geto('d')) {
 $version = CLI::geto('v');
 
 echo "Retrieving Wordpress $version...";
-$start = time();
-$wp = file_get_contents("http://wordpress.org/wordpress-$version.tar.gz");
-$end = time();
 $wp_file = $data_dir . DIRECTORY_SEPARATOR . "wordpress-$version.tar.gz";
-file_put_contents($wp_file, $wp);
-unset($wp);
-
-$kbs = floor((filesize($wp_file)/1024)/($end - $start));
+if (!file_exists($wp_file)) {
+	$start = time();
+	$wp = file_get_contents("http://wordpress.org/wordpress-$version.tar.gz");
+	$end = time();
+	file_put_contents($wp_file, $wp);
+	unset($wp);
+	$kbs = floor((filesize($wp_file)/1024)/($end - $start));
+}
 
 echo "... done! ({$kbs}KB/s)" . PHP_EOL;
 
@@ -76,20 +73,11 @@ if (file_exists($file_dir)) {
 }
 /*$tar = new Archive_Tar($wp_file, 'gz');
 $tar->extract($file_dir);*/
-`cd $file_dir && tar -zxvf $wp_file > /dev/null`;
+`cd $file_dir && tar -zxf $wp_file > /dev/null`;
 echo "... complete!" . PHP_EOL;
 
-$server = CLI::geto('f');
-$port = CLI::geto('P') ? CLI::geto('P') : '21';
-$user = CLI::geto('u');
-$password = CLI::geto('p');
 $wordpress = CLI::geto('w');
 
-if (!$password || $password === true) {
-	$password = trim(CLI::password_prompt('FTP Password:'));
-}
-
-echo "Testing remote connection...";
 
 if (substr($wordpress, -1) != '/') {
     $wordpress .= '/';
@@ -99,107 +87,9 @@ if ($wordpress{0} != '/') {
     $wordpress = '/' .$wordpress;
 }
 
-$dsn = "ftp://$user:$password@$server$wordpress";
-
-if (!$fp = file_get_contents($dsn . 'wp-config.php')) {
-    echo "... failed! ($dsn)" . PHP_EOL;
-    exit(-1);
-} else {
-    echo "... success!" . PHP_EOL;
-}
 
 $remote_file_dir = $file_dir . '-remote';
 
-$plugins = CLI::geto('l');
-if ($plugins) {
-	if (!class_exists('ZipArchive')) {
-		echo "PHP Zip Extension is required to check plugins. Skipping." . PHP_EOL;
-	} else {
-		if (!file_exists($remote_file_dir . DIRECTORY_SEPARATOR .'wp-content')) {
-			mkdir($remote_file_dir . DIRECTORY_SEPARATOR .'wp-content');
-		}
-
-		$plugins_dir = $file_dir . DIRECTORY_SEPARATOR .'wordpress'. DIRECTORY_SEPARATOR .'wp-content'. DIRECTORY_SEPARATOR .'plugins';
-
-		if (!file_exists($file_dir . DIRECTORY_SEPARATOR .'wp-content'. DIRECTORY_SEPARATOR .'plugins')) {
-			mkdir($plugins_dir);
-		}
-
-		echo "Retrieving Plugin List...";
-		$fp = ftp_connect($server, $port);
-		ftp_login($fp, $user, $password);
-		$plugins_list = ftp_nlist($fp, $wordpress .'/wp-content/plugins');
-		foreach ($plugins_list as $key => $plugin) {
-			$slug = basename($plugin);
-			if ($slug{0} == '.' || $slug == '__MACOSX') {
-				unset($plugins_list[$key]);
-			}
-		}
-		ftp_close($fp);
-
-		echo "... found " .sizeof($plugins_list) .' plugins.' . PHP_EOL;
-
-		echo "Retrieving Plugins...";
-
-		$plugin_errors = array();
-
-		foreach ($plugins_list as $plugin) {
-			/* Query the Wordpress API for plugin info */
-
-			// The data to send
-			$fields = array(
-				'description' => false,
-				'sections' => false,
-				'tested'  => false,
-				'requires' => false,
-				'rating' => false,
-				'downloaded' => false,
-				'downloadlink' => true,
-				'last_updated'  => false,
-				'homepage' => false,
-				'tags' => false
-			);
-
-			$data = array('action' => 'plugin_information', 'request' => serialize((object) array('slug' => basename($plugin), 'fields' => $fields)));
-
-			// URL Encode the data
-			$urlencoded = http_build_query($data);
-
-			$options = array (
-				   'http' => array (
-					  'method' => 'POST',
-					  'header'=>
-						 "Content-type: application/x-www-form-urlencoded\r\n"
-					   . "Content-Length: " . strlen($urlencoded) . "\r\n",
-				   'content' => $urlencoded
-				)
-			);
-
-			$context = stream_context_create($options);
-
-			$response = file_get_contents("http://api.wordpress.org/plugins/info/1.0/", false, $context);
-			$plugin_result = unserialize($response);
-			if (isset($plugin_result->error)) {
-				$plugin_errors[$slug] = $plugin_result->error;
-				continue;
-			}
-
-			$plugin_dir = $plugins_dir .DIRECTORY_SEPARATOR. $slug;
-
-			/* @todo Doing this any other way (i.e. fopen/fread/fwrite, file_get_contents) results in a segfault */
-			`cd $plugins_dir && wget $plugin_result->download_link -q`;
-
-			$zip = new ZipArchive();
-			$zip->open($plugins_dir .DIRECTORY_SEPARATOR. basename($plugin_result->download_link));
-			$zip->extractTo($plugins_dir);
-
-			echo ".";
-		}
-
-		$result = (sizeof($plugin_errors) > 0) ? " with " .sizeof($plugin_errors). " errors." : "success!";
-		echo "... " .$result. PHP_EOL;
-	}
-}
 
 echo "Generating MD5sums...";
 
@@ -248,12 +138,9 @@ if (file_exists($remote_file_dir)) {
     exit(-1);
 }
 
-mkdir($remote_file_dir);
 
 $failed = array();
 $i = 0;
-$fp = ftp_connect($server, $port);
-ftp_login($fp, $user, $password);
 foreach (array_keys($md5sums) as $file) {
     $i++;
 
@@ -261,29 +148,20 @@ foreach (array_keys($md5sums) as $file) {
 		echo '.';
 	}
 
-    ftp_get($fp, $remote_file_dir . DIRECTORY_SEPARATOR . basename($file), $wordpress . $file, FTP_BINARY);
-	//$dsn = "ftp://$user:$password@$server$wordpress$file";
-	//file_get_contents($dsn);
-	//$md5 = md5();
-
-    if (md5_file($remote_file_dir . DIRECTORY_SEPARATOR . basename($file)) != $md5sums[$file]) {
+    if (md5_file($wordpress . $file) != $md5sums[$file]) {
+		echo "". md5_file($wordpress . $file) . " != ". $md5sums[$file] ."\n";
+        
         $failed[] = array($file);
-		$diff = CLI::geto('i');
-		if ($diff) {
-			$remote = $remote_file_dir . DIRECTORY_SEPARATOR . basename($file);
-			$original = $file_dir . DIRECTORY_SEPARATOR . 'wordpress' .DIRECTORY_SEPARATOR. $file;
-			if (file_exists($remote) && file_exists($original)) {
-				`diff -u $original $remote >> $diff`;
-			}
-		}
     }
+
+
 }
 echo "... complete!" . PHP_EOL;
-ftp_close($fp);
 
 if ($failed) {
     echo CLI::theme_table($failed, array("Filename"), "Failed files");
 } else {
     echo "Wordpress install is pristine!" . PHP_EOL;
 }
+
 ?>

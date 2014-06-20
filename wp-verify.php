@@ -1,91 +1,93 @@
 #!/usr/bin/php
 <?php
 error_reporting(0);
-set_include_path('.' . PATH_SEPARATOR . dirname(__FILE__) . PATH_SEPARATOR . get_include_path());
-require_once 'cli.sh';
-// Try to include system PEAR Archive_TAR
-@include 'Archive/TAR.php';
-if (!class_exists('Archive_TAR')) {
-    // No guarantees this will work
-    echo "Warning: Using built-in Archive_TAR! This has not been tested well!" . PHP_EOL;
-    include 'Archive/TAR-mini.php';
+
+function print_usage() {
+	echo PHP_EOL;
+	echo "Usage: php ./wp-verify.php <wordpress-path> [<tmp-path>]". PHP_EOL;
+	echo PHP_EOL;
 }
 
-CLI::seto(
-    array(
-        'd:' => 'Temporary Data directory',
-        'w:' => 'Wordpress Path on remote host',
-        'v:' => 'Wordpress Version',
-		'l' => 'Check Plugins',
-		'i:' => 'Diff to file',
-    )
-);
-
-if ( !CLI::geto('v') || !CLI::geto('w')) {
-    CLI::gethelp();
-    exit(-1);
+if (($argc < 2) || ($argv[1] == "-h") || ($argv[1] == "--help")){
+	print_usage();
+	exit(-1);
 }
 
-if (!$data_dir = CLI::geto('d')) {
-    $data_dir = realpath(sys_get_temp_dir()) .DIRECTORY_SEPARATOR. uniqid('wp-verify-');
-	mkdir($data_dir);
-	echo "Created temporary directory: " .$data_dir . PHP_EOL;
-} elseif (!file_exists($data_dir)) {
-	$result = @mkdir($data_dir);
-	if (!$result) {
-		echo "Data directory does not exist, and cannot be created." . PHP_EOL;
-		exit(-1);
+
+$wordpress_path = $argv[1];
+
+$data_dir = realpath(sys_get_temp_dir()) . DIRECTORY_SEPARATOR. uniqid('wp-verify-');
+if ($argc == 3) {
+	$data_dir = $argv[2]; 
+	if (!file_exists($data_dir)) {	
+		$result = @mkdir($data_dir);
+		if (!$result) {
+			echo "Data directory does not exist, and cannot be created." . PHP_EOL;
+			exit(-1);
+		}
 	}
+} else {
+	mkdir($data_dir);
+	echo "Created temporary directory: " .$data_dir . PHP_EOL;	
 }
 
-$version = CLI::geto('v');
+if ( !(file_exists($wordpress_path) && is_dir($wordpress_path))) {
+	echo "ERROR: path $wordpress_path not found". PHP_EOL;
+	print_usage();
+	exit(-1);
+}
 
-echo "Retrieving Wordpress $version...";
-$wp_file = $data_dir . DIRECTORY_SEPARATOR . "wordpress-$version.tar.gz";
+
+$config_file = $wordpress_path . DIRECTORY_SEPARATOR . 'wp-includes/version.php';
+
+if (!file_exists($config_file)) {
+	echo "ERROR: $config_file not found". PHP_EOL;
+	echo "       are you sure this is a wordpress directory?". PHP_EOL;
+	print_usage();
+	exit(-1);
+}
+
+require($config_file);
+
+
+
+$wp_file = $data_dir . DIRECTORY_SEPARATOR . "wordpress-$wp_version.tar.gz";
 if (!file_exists($wp_file)) {
+	echo "Retrieving Wordpress $wp_version...";
+
 	$start = time();
-	$wp = file_get_contents("http://wordpress.org/wordpress-$version.tar.gz");
+	$wp = file_get_contents("http://wordpress.org/wordpress-$wp_version.tar.gz");
 	$end = time();
 	file_put_contents($wp_file, $wp);
 	unset($wp);
 	$kbs = floor((filesize($wp_file)/1024)/($end - $start));
+	
+	echo "... done! ({$kbs}KB/s)" . PHP_EOL;
 }
 
-echo "... done! ({$kbs}KB/s)" . PHP_EOL;
 
-echo "Verifying build...";
-$md5 = trim(file_get_contents("http://wordpress.org/wordpress-$version.md5"));
+echo "Verifying wordpress download...";
+$md5 = trim(file_get_contents("http://wordpress.org/wordpress-$wp_version.md5"));
 $md5_file = md5_file($wp_file);
 if ($md5 == $md5_file) {
     echo "... verified!" . PHP_EOL;
 } else {
     echo "... failed! ($md5 does not match $md5_file)" . PHP_EOL;
+    echo "remove $wp_file and run this again". PHP_EOL;
     exit(-1);
 }
 
 echo "Unpacking Wordpress...";
-$file_dir = $data_dir . DIRECTORY_SEPARATOR . "wordpress-$version";
+$file_dir = $data_dir . DIRECTORY_SEPARATOR . "wordpress-$wp_version";
 if (file_exists($file_dir)) {
     echo "... failed! (Unpack directory already exists: $file_dir)" . PHP_EOL;
     exit(-1);
 } else {
     mkdir($file_dir);
 }
-/*$tar = new Archive_Tar($wp_file, 'gz');
-$tar->extract($file_dir);*/
+
 `cd $file_dir && tar -zxf $wp_file > /dev/null`;
 echo "... complete!" . PHP_EOL;
-
-$wordpress = CLI::geto('w');
-
-
-if (substr($wordpress, -1) != '/') {
-    $wordpress .= '/';
-}
-
-if ($wordpress{0} != '/') {
-    $wordpress = '/' .$wordpress;
-}
 
 
 $remote_file_dir = $file_dir . '-remote';
@@ -102,7 +104,8 @@ try {
 
 $i = 0;
 
-$ignored_extensions = array('jpg', 'gif', 'png', 'pdf', 'swf', 'pot', 'txt', 'html', 'css', 'htm', 'zip');
+// $ignored_extensions = array('jpg', 'gif', 'png', 'pdf', 'swf', 'pot', 'txt', 'html', 'css', 'htm', 'zip');
+$ignored_extensions = array();
 
 foreach ($wp as $file) {
     if (!$file->isFile() || basename($file->getFileName()) == 'wp-config-sample.php') {
@@ -131,7 +134,7 @@ foreach ($wp as $file) {
 }
 echo "... done!" . PHP_EOL;
 
-echo "Comparing " .sizeof($md5sums). " remote files...";
+echo "Comparing " .sizeof($md5sums). " files...";
 $i = 0;
 if (file_exists($remote_file_dir)) {
     echo "... failed! (Temp directory already exist: $remote_file_dir)";
@@ -148,8 +151,8 @@ foreach (array_keys($md5sums) as $file) {
 		echo '.';
 	}
 
-    if (md5_file($wordpress . $file) != $md5sums[$file]) {
-		echo "". md5_file($wordpress . $file) . " != ". $md5sums[$file] ."\n";
+    if (md5_file($wordpress_path . $file) != $md5sums[$file]) {
+		//echo "". md5_file($wordpress_path . $file) . " != ". $md5sums[$file] ."\n";
         
         $failed[] = array($file);
     }
@@ -159,9 +162,24 @@ foreach (array_keys($md5sums) as $file) {
 echo "... complete!" . PHP_EOL;
 
 if ($failed) {
-    echo CLI::theme_table($failed, array("Filename"), "Failed files");
+
+	echo "Failed files:" . PHP_EOL;
+	foreach($failed as $item) {
+		echo "   " . $item[0] . PHP_EOL;
+	}
+	echo PHP_EOL;
+
 } else {
     echo "Wordpress install is pristine!" . PHP_EOL;
 }
+
+// clean up
+echo "removing $file_dir" . PHP_EOL;
+foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($file_dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST) as $path) {
+    $path->isDir() ? rmdir($path->getPathname()) : unlink($path->getPathname());
+}
+rmdir($file_dir);
+
+
 
 ?>
